@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"><title>TikTok connected</title></head><body><main><nav><a href="./">Home</a><a href="terms.html">Terms of Service</a><a href="privacy.html">Privacy Policy</a></nav>
+<h1 id="h">Connecting TikTok…</h1>
+<p id="msg" class="muted"></p>
+<pre id="code" style="white-space:pre-wrap;word-break:break-all;padding:12px;border:1px solid var(--muted);border-radius:8px;display:none"></pre>
+<script>
+var q=new URLSearchParams(location.search),c=q.get('code'),e=q.get('error');
+var h=document.getElementById('h'),m=document.getElementById('msg'),p=document.getElementById('code');
+if(c){h.textContent='TikTok account authorised';m.textContent='Copy this one-time code and paste it back to Claude. It expires in a few minutes and only works once.';p.textContent=c;p.style.display='block';}
+else if(e){h.textContent='Authorisation was cancelled';m.textContent=(q.get('error_description')||e);}
+else{h.textContent='Nothing to show';m.textContent='This page is where TikTok returns after you authorise the Everyday Explained publisher.';}
+</script>
+</main></body></html>
