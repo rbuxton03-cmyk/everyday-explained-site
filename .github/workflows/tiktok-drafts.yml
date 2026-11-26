@@ -32,7 +32,7 @@ jobs:
       - name: Sign in and upload one video
         run: |
           set -euo pipefail
-          KEY=$(printf 'tiktok-token:%s' "$CLIENT_SECRET" | sha256sum | cut -d' ' -f1)
+          export KEY=$(printf 'tiktok-token:%s' "$CLIENT_SECRET" | sha256sum | cut -d' ' -f1)
           echo "::add-mask::$KEY"
           CODE=$(jq -r '.code // ""' demo/request.json 2>/dev/null || true)
           if [ -n "$CODE" ]; then
