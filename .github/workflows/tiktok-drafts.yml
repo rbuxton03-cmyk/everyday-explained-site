@@ -33,8 +33,11 @@ jobs:
           NAME=$(curl -sS 'https://open.tiktokapis.com/v2/user/info/?fields=display_name' -H "Authorization: Bearer $AT" | jq -r .data.user.display_name)
           echo "Connected TikTok account: $NAME"
           # request.json: {"code": "...", "videos": ["demo/a.mp4", ...]}  (old {"video": "..."} still works)
-          FAILS=0
+          FAILS=0; N=0
+          GAP=$(jq -r '.gap // 0' demo/request.json)   # seconds between videos, so each draft can be saved first
           for VIDEO in $(jq -r '(.videos // [.video])[]' demo/request.json); do
+            if [ "$N" -gt 0 ] && [ "$GAP" -gt 0 ]; then echo "waiting ${GAP}s before the next video"; sleep "$GAP"; fi
+            N=$((N+1))
             echo "--- $VIDEO"
             SIZE=$(stat -c %s "$VIDEO")
             INIT=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/inbox/video/init/ \
