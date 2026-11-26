@@ -1,13 +1,25 @@
 name: Send video to TikTok drafts
-# Runs when demo/request.json is pushed with a fresh one-time code from callback.html.
-# Exchanges the code, confirms the connected account, and uploads the video to that
-# account's TikTok drafts inbox. Tokens are masked and never stored.
+# Sends Everyday Explained videos to the creator's TikTok drafts inbox (never posts publicly).
+#
+# Sign-in: the first time (or after a year / a revoked login) push demo/request.json with a
+# fresh one-time code from callback.html. The workflow keeps the resulting refresh token,
+# encrypted with a key derived from the TIKTOK_CLIENT_SECRET secret, in .tiktok/token.enc.
+# After that no code is needed.
+#
+# Videos: drop MP4s into queue/. Each run sends the OLDEST queued video (one per run, because
+# TikTok refuses new uploads while too many drafts are unposted), then removes it from queue/.
+# Runs daily at 9 am Brisbane, on every push to queue/ or request.json, or by hand.
 on:
   push:
-    paths: [demo/request.json]
+    paths: [demo/request.json, "queue/**"]
+  schedule:
+    - cron: "0 23 * * *"     # 23:00 UTC = 9:00 am Brisbane
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: tiktok-drafts
+  cancel-in-progress: false
 jobs:
   upload:
     runs-on: ubuntu-latest
@@ -17,42 +29,70 @@ jobs:
       REDIRECT: https://rbuxton03-cmyk.github.io/everyday-explained-site/callback.html
     steps:
       - uses: actions/checkout@v4
-      - name: Upload to drafts
+      - name: Sign in and upload one video
         run: |
           set -euo pipefail
-          CODE=$(jq -r .code demo/request.json)
+          KEY=$(printf 'tiktok-token:%s' "$CLIENT_SECRET" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::$KEY"
+          CODE=$(jq -r '.code // ""' demo/request.json 2>/dev/null || true)
+          if [ -n "$CODE" ]; then
+            echo "Signing in with a new one-time code"
+            FORM=(--data-urlencode "code=$CODE" --data-urlencode grant_type=authorization_code --data-urlencode "redirect_uri=$REDIRECT")
+          elif [ -f .tiktok/token.enc ]; then
+            RT=$(openssl enc -d -aes-256-cbc -pbkdf2 -a -A -pass env:KEY -in .tiktok/token.enc)
+            echo "::add-mask::$RT"
+            FORM=(--data-urlencode "refresh_token=$RT" --data-urlencode grant_type=refresh_token)
+          else
+            echo "No saved sign-in yet: push demo/request.json with a code from callback.html"; exit 1
+          fi
           TOK=$(curl -sS -X POST https://open.tiktokapis.com/v2/oauth/token/ \
             -H 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode "client_key=$CLIENT_KEY" --data-urlencode "client_secret=$CLIENT_SECRET" \
-            --data-urlencode "code=$CODE" --data-urlencode grant_type=authorization_code \
-            --data-urlencode "redirect_uri=$REDIRECT")
+            --data-urlencode "client_key=$CLIENT_KEY" --data-urlencode "client_secret=$CLIENT_SECRET" "${FORM[@]}")
           AT=$(echo "$TOK" | jq -r '.access_token // empty')
-          if [ -z "$AT" ]; then echo "token exchange failed: $(echo "$TOK" | jq -c '{error,error_description}')"; exit 1; fi
-          echo "::add-mask::$AT"
-          echo "Scopes granted: $(echo "$TOK" | jq -r .scope)"
+          if [ -z "$AT" ]; then echo "sign-in failed: $(echo "$TOK" | jq -c '{error,error_description}')"; exit 1; fi
+          RT=$(echo "$TOK" | jq -r .refresh_token)
+          echo "::add-mask::$AT"; echo "::add-mask::$RT"
+          echo "Scopes: $(echo "$TOK" | jq -r .scope); refresh token valid for $(( $(echo "$TOK" | jq -r .refresh_expires_in) / 86400 )) days"
           NAME=$(curl -sS 'https://open.tiktokapis.com/v2/user/info/?fields=display_name' -H "Authorization: Bearer $AT" | jq -r .data.user.display_name)
           echo "Connected TikTok account: $NAME"
-          # request.json: {"code": "...", "videos": ["demo/a.mp4", ...]}  (old {"video": "..."} still works)
-          FAILS=0; N=0
-          GAP=$(jq -r '.gap // 0' demo/request.json)   # seconds between videos, so each draft can be saved first
-          for VIDEO in $(jq -r '(.videos // [.video])[]' demo/request.json); do
-            if [ "$N" -gt 0 ] && [ "$GAP" -gt 0 ]; then echo "waiting ${GAP}s before the next video"; sleep "$GAP"; fi
-            N=$((N+1))
-            echo "--- $VIDEO"
+
+          # Save the (possibly rotated) refresh token, encrypted; clear the used code.
+          mkdir -p .tiktok
+          printf '%s' "$RT" | openssl enc -aes-256-cbc -pbkdf2 -salt -a -A -pass env:KEY -out .tiktok/token.enc
+          echo '{"code": ""}' > demo/request.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .tiktok/token.enc demo/request.json
+
+          VIDEO=$(ls queue/*.mp4 2>/dev/null | sort | head -1 || true)
+          if [ -n "$VIDEO" ]; then
+            echo "--- $VIDEO ($(ls queue/*.mp4 | wc -l) queued)"
             SIZE=$(stat -c %s "$VIDEO")
             INIT=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/inbox/video/init/ \
               -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' \
               -d "{\"source_info\":{\"source\":\"FILE_UPLOAD\",\"video_size\":$SIZE,\"chunk_size\":$SIZE,\"total_chunk_count\":1}}")
-            echo "init: $(echo "$INIT" | jq -c '.error')"
-            URL=$(echo "$INIT" | jq -r .data.upload_url); PID=$(echo "$INIT" | jq -r .data.publish_id)
-            echo "::add-mask::$URL"
-            curl -sS -X PUT "$URL" -H 'Content-Type: video/mp4' -H "Content-Range: bytes 0-$((SIZE-1))/$SIZE" --data-binary @"$VIDEO" -o /dev/null -w "upload HTTP %{http_code}\n"
-            for i in $(seq 1 24); do
-              sleep 5
-              ST=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/status/fetch/ \
-                -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' -d "{\"publish_id\":\"$PID\"}" | jq -r '.data.status')
+            ERR=$(echo "$INIT" | jq -r .error.code)
+            echo "init: $ERR"
+            if [ "$ERR" = "ok" ]; then
+              URL=$(echo "$INIT" | jq -r .data.upload_url); PID=$(echo "$INIT" | jq -r .data.publish_id)
+              echo "::add-mask::$URL"
+              curl -sS -X PUT "$URL" -H 'Content-Type: video/mp4' -H "Content-Range: bytes 0-$((SIZE-1))/$SIZE" --data-binary @"$VIDEO" -o /dev/null -w "upload HTTP %{http_code}\n"
+              ST=""
+              for i in $(seq 1 24); do
+                sleep 5
+                ST=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/status/fetch/ \
+                  -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' -d "{\"publish_id\":\"$PID\"}" | jq -r '.data.status')
+                case "$ST" in SEND_TO_USER_INBOX|PUBLISH_COMPLETE|FAILED) break;; esac
+              done
               echo "status: $ST"
-              case "$ST" in SEND_TO_USER_INBOX|PUBLISH_COMPLETE) echo "Done: $VIDEO is in your TikTok drafts inbox."; break;; FAILED) echo "FAILED: $VIDEO"; FAILS=$((FAILS+1)); break;; esac
-            done
-          done
-          exit $FAILS
+              if [ "$ST" = "SEND_TO_USER_INBOX" ] || [ "$ST" = "PUBLISH_COMPLETE" ]; then
+                git rm -q "$VIDEO"; echo "Done: $VIDEO is in the TikTok drafts inbox."
+              fi
+            elif [ "$ERR" = "spam_risk_too_many_pending_share" ]; then
+              echo "TikTok says too many drafts are waiting unposted. $VIDEO stays queued for the next run."
+            fi
+          else
+            echo "Queue is empty; sign-in refreshed only."
+          fi
+          git commit -qm "TikTok drafts: refresh sign-in${VIDEO:+, sent $(basename "$VIDEO")}" || true
+          git push
