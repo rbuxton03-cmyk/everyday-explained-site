@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"><title>Connect TikTok</title></head><body><main><nav><a href="./">Home</a><a href="connect.html">Connect TikTok</a><a href="terms.html">Terms of Service</a><a href="privacy.html">Privacy Policy</a></nav>
+<h1>Connect your TikTok account</h1>
+<p>Everyday Explained uploads its finished videos to your TikTok <strong>drafts</strong>. Nothing is posted automatically: you open each draft in the TikTok app, add a sound and post it yourself.</p>
+<p>This asks TikTok for two permissions: your basic profile (to confirm the right account is connected) and uploading videos to your drafts.</p>
+<p><a id="go" href="#" style="display:inline-block;padding:14px 22px;border-radius:999px;background:#fe2c55;color:#fff;text-decoration:none;font-weight:700">Continue with TikTok</a></p>
+<p class="muted">You can disconnect at any time in TikTok under Settings and privacy, Security, Apps and services.</p>
+<script>
+var KEY='sbawk2nq3p9miptjd6';   // sandbox client key (public)
+var REDIRECT=location.origin+location.pathname.replace(/connect\.html$/,'')+'callback.html';
+var st=Math.random().toString(36).slice(2);try{sessionStorage.setItem('tt_state',st)}catch(e){}
+document.getElementById('go').href='https://www.tiktok.com/v2/auth/authorize/?'+new URLSearchParams({client_key:KEY,scope:'user.info.basic,video.upload',response_type:'code',redirect_uri:REDIRECT,state:st});
+</script>
+</main></body></html>
