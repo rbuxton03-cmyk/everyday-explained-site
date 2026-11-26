@@ -21,7 +21,6 @@ jobs:
         run: |
           set -euo pipefail
           CODE=$(jq -r .code demo/request.json)
-          VIDEO=$(jq -r .video demo/request.json)
           TOK=$(curl -sS -X POST https://open.tiktokapis.com/v2/oauth/token/ \
             -H 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode "client_key=$CLIENT_KEY" --data-urlencode "client_secret=$CLIENT_SECRET" \
@@ -33,18 +32,24 @@ jobs:
           echo "Scopes granted: $(echo "$TOK" | jq -r .scope)"
           NAME=$(curl -sS 'https://open.tiktokapis.com/v2/user/info/?fields=display_name' -H "Authorization: Bearer $AT" | jq -r .data.user.display_name)
           echo "Connected TikTok account: $NAME"
-          SIZE=$(stat -c %s "$VIDEO")
-          INIT=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/inbox/video/init/ \
-            -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' \
-            -d "{\"source_info\":{\"source\":\"FILE_UPLOAD\",\"video_size\":$SIZE,\"chunk_size\":$SIZE,\"total_chunk_count\":1}}")
-          echo "init: $(echo "$INIT" | jq -c '.error')"
-          URL=$(echo "$INIT" | jq -r .data.upload_url); PID=$(echo "$INIT" | jq -r .data.publish_id)
-          echo "::add-mask::$URL"
-          curl -sS -X PUT "$URL" -H 'Content-Type: video/mp4' -H "Content-Range: bytes 0-$((SIZE-1))/$SIZE" --data-binary @"$VIDEO" -o /dev/null -w "upload HTTP %{http_code}\n"
-          for i in $(seq 1 24); do
-            sleep 5
-            ST=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/status/fetch/ \
-              -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' -d "{\"publish_id\":\"$PID\"}" | jq -r '.data.status')
-            echo "status: $ST"
-            case "$ST" in SEND_TO_USER_INBOX|PUBLISH_COMPLETE) echo "Done: the video is in your TikTok drafts inbox."; exit 0;; FAILED) exit 1;; esac
+          # request.json: {"code": "...", "videos": ["demo/a.mp4", ...]}  (old {"video": "..."} still works)
+          FAILS=0
+          for VIDEO in $(jq -r '(.videos // [.video])[]' demo/request.json); do
+            echo "--- $VIDEO"
+            SIZE=$(stat -c %s "$VIDEO")
+            INIT=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/inbox/video/init/ \
+              -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' \
+              -d "{\"source_info\":{\"source\":\"FILE_UPLOAD\",\"video_size\":$SIZE,\"chunk_size\":$SIZE,\"total_chunk_count\":1}}")
+            echo "init: $(echo "$INIT" | jq -c '.error')"
+            URL=$(echo "$INIT" | jq -r .data.upload_url); PID=$(echo "$INIT" | jq -r .data.publish_id)
+            echo "::add-mask::$URL"
+            curl -sS -X PUT "$URL" -H 'Content-Type: video/mp4' -H "Content-Range: bytes 0-$((SIZE-1))/$SIZE" --data-binary @"$VIDEO" -o /dev/null -w "upload HTTP %{http_code}\n"
+            for i in $(seq 1 24); do
+              sleep 5
+              ST=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/status/fetch/ \
+                -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' -d "{\"publish_id\":\"$PID\"}" | jq -r '.data.status')
+              echo "status: $ST"
+              case "$ST" in SEND_TO_USER_INBOX|PUBLISH_COMPLETE) echo "Done: $VIDEO is in your TikTok drafts inbox."; break;; FAILED) echo "FAILED: $VIDEO"; FAILS=$((FAILS+1)); break;; esac
+            done
           done
+          exit $FAILS
