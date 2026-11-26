@@ -8,12 +8,14 @@ name: Send video to TikTok drafts
 #
 # Videos: drop MP4s into queue/. Each run sends the OLDEST queued video (one per run, because
 # TikTok refuses new uploads while too many drafts are unposted), then removes it from queue/.
-# Runs daily at 9 am Brisbane, on every push to queue/ or request.json, or by hand.
+# Runs daily at 7 am, 2 pm and 8 pm Brisbane (same slots as Instagram), on every push to queue/ or request.json, or by hand.
 on:
   push:
     paths: [demo/request.json, "queue/**"]
   schedule:
-    - cron: "0 23 * * *"     # 23:00 UTC = 9:00 am Brisbane
+    - cron: "0 21 * * *"     # 21:00 UTC = 7:00 am Brisbane
+    - cron: "0 4 * * *"      # 04:00 UTC = 2:00 pm Brisbane
+    - cron: "0 10 * * *"     # 10:00 UTC = 8:00 pm Brisbane
   workflow_dispatch:
 permissions:
   contents: write
