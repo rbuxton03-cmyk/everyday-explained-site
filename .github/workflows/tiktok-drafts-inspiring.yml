@@ -1,0 +1,99 @@
+name: Send video to TikTok drafts (inspiringanimations)
+# Sends inspiringanimations videos to the creator's TikTok drafts inbox (never posts publicly).
+#
+# Sign-in: the first time (or after a year / a revoked login) push inspiring/request.json with a
+# fresh one-time code from callback.html. The workflow keeps the resulting refresh token,
+# encrypted with a key derived from the TIKTOK_CLIENT_SECRET secret, in .tiktok/token-inspiring.enc.
+# After that no code is needed.
+#
+# Videos: drop MP4s into queue-inspiring/. Each run sends the OLDEST queued video (one per run, because
+# TikTok refuses new uploads while too many drafts are unposted), then removes it from queue-inspiring/.
+# Lives on branch claude/project-thread-9pf7pq (scheduled runs are started by the scheduler on main,
+# since GitHub only runs cron from the default branch). Also runs on every push to queue-inspiring/
+# or inspiring/request.json, or by hand. Separate account, separate token and queue from Everyday Explained.
+on:
+  push:
+    paths: [inspiring/request.json, "queue-inspiring/**"]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tiktok-drafts-inspiring
+  cancel-in-progress: false
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    env:
+      CLIENT_KEY: sbawk2nq3p9miptjd6
+      CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+      REDIRECT: https://rbuxton03-cmyk.github.io/everyday-explained-site/callback.html
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sign in and upload one video
+        run: |
+          set -euo pipefail
+          export KEY=$(printf 'tiktok-token:%s' "$CLIENT_SECRET" | sha256sum | cut -d' ' -f1)
+          echo "::add-mask::$KEY"
+          CODE=$(jq -r '.code // ""' inspiring/request.json 2>/dev/null || true)
+          if [ -n "$CODE" ]; then
+            echo "Signing in with a new one-time code"
+            FORM=(--data-urlencode "code=$CODE" --data-urlencode grant_type=authorization_code --data-urlencode "redirect_uri=$REDIRECT")
+          elif [ -f .tiktok/token-inspiring.enc ]; then
+            RT=$(openssl enc -d -aes-256-cbc -pbkdf2 -a -A -pass env:KEY -in .tiktok/token-inspiring.enc)
+            echo "::add-mask::$RT"
+            FORM=(--data-urlencode "refresh_token=$RT" --data-urlencode grant_type=refresh_token)
+          else
+            echo "No saved sign-in yet: push inspiring/request.json with a code from callback.html"; exit 1
+          fi
+          TOK=$(curl -sS -X POST https://open.tiktokapis.com/v2/oauth/token/ \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode "client_key=$CLIENT_KEY" --data-urlencode "client_secret=$CLIENT_SECRET" "${FORM[@]}")
+          AT=$(echo "$TOK" | jq -r '.access_token // empty')
+          if [ -z "$AT" ]; then echo "sign-in failed: $(echo "$TOK" | jq -c '{error,error_description}')"; exit 1; fi
+          RT=$(echo "$TOK" | jq -r .refresh_token)
+          echo "::add-mask::$AT"; echo "::add-mask::$RT"
+          echo "Scopes: $(echo "$TOK" | jq -r .scope); refresh token valid for $(( $(echo "$TOK" | jq -r .refresh_expires_in) / 86400 )) days"
+          NAME=$(curl -sS 'https://open.tiktokapis.com/v2/user/info/?fields=display_name' -H "Authorization: Bearer $AT" | jq -r .data.user.display_name)
+          echo "Connected TikTok account: $NAME"
+
+          # Save the (possibly rotated) refresh token, encrypted; clear the used code.
+          mkdir -p .tiktok
+          printf '%s' "$RT" | openssl enc -aes-256-cbc -pbkdf2 -salt -a -A -pass env:KEY -out .tiktok/token-inspiring.enc
+          echo '{"code": ""}' > inspiring/request.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .tiktok/token-inspiring.enc inspiring/request.json
+
+          VIDEO=$(ls queue-inspiring/*.mp4 2>/dev/null | sort | head -1 || true)
+          if [ -n "$VIDEO" ]; then
+            echo "--- $VIDEO ($(ls queue-inspiring/*.mp4 | wc -l) queued)"
+            SIZE=$(stat -c %s "$VIDEO")
+            INIT=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/inbox/video/init/ \
+              -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' \
+              -d "{\"source_info\":{\"source\":\"FILE_UPLOAD\",\"video_size\":$SIZE,\"chunk_size\":$SIZE,\"total_chunk_count\":1}}")
+            ERR=$(echo "$INIT" | jq -r .error.code)
+            echo "init: $ERR"
+            if [ "$ERR" = "ok" ]; then
+              URL=$(echo "$INIT" | jq -r .data.upload_url); PID=$(echo "$INIT" | jq -r .data.publish_id)
+              echo "::add-mask::$URL"
+              curl -sS -X PUT "$URL" -H 'Content-Type: video/mp4' -H "Content-Range: bytes 0-$((SIZE-1))/$SIZE" --data-binary @"$VIDEO" -o /dev/null -w "upload HTTP %{http_code}\n"
+              ST=""
+              for i in $(seq 1 24); do
+                sleep 5
+                ST=$(curl -sS -X POST https://open.tiktokapis.com/v2/post/publish/status/fetch/ \
+                  -H "Authorization: Bearer $AT" -H 'Content-Type: application/json; charset=UTF-8' -d "{\"publish_id\":\"$PID\"}" | jq -r '.data.status')
+                case "$ST" in SEND_TO_USER_INBOX|PUBLISH_COMPLETE|FAILED) break;; esac
+              done
+              echo "status: $ST"
+              if [ "$ST" = "SEND_TO_USER_INBOX" ] || [ "$ST" = "PUBLISH_COMPLETE" ]; then
+                git rm -q "$VIDEO"; echo "Done: $VIDEO is in the TikTok drafts inbox."
+              fi
+            elif [ "$ERR" = "spam_risk_too_many_pending_share" ]; then
+              echo "TikTok says too many drafts are waiting unposted. $VIDEO stays queued for the next run."
+            fi
+          else
+            echo "Queue is empty; sign-in refreshed only."
+          fi
+          git commit -qm "TikTok drafts: refresh sign-in${VIDEO:+, sent $(basename "$VIDEO")}" || true
+          git pull -q --rebase origin "${GITHUB_REF_NAME}" || true
+          git push
